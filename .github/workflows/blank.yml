@@ -34,3 +34,5 @@ jobs:
         run: |
           echo Add other actions to build,
           echo test, and deploy your project.
+          echo This is my first DevOps project.
+          echo I am learning DevOps.
