@@ -1,0 +1,14 @@
+name: Hello DevOps Workflow
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  say-hello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print Hello
+        run: echo "Hello DevOps"
+      - name: Print Current Date
+        run: date
