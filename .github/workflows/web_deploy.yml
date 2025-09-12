@@ -1,0 +1,111 @@
+name: Deploy HTML to EC2
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Deploy to EC2
+      env:
+        SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        SSH_HOST: ${{ secrets.SSH_HOST }}
+        SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+      run: |
+        echo "🚀 Starting deployment to EC2..."
+        
+        # Create SSH key file
+        echo "$SSH_PRIVATE_KEY" > private_key
+        chmod 600 private_key
+        
+        # Copy HTML file to EC2
+        echo "📤 Copying index.html to EC2 instance..."
+        scp -o StrictHostKeyChecking=no -i private_key index.html ${SSH_USERNAME}@${SSH_HOST}:/tmp/index.html.template
+        
+        # Execute deployment commands on EC2
+        echo "🔧 Executing deployment commands on EC2..."
+        ssh -o StrictHostKeyChecking=no -i private_key ${SSH_USERNAME}@${SSH_HOST} << 'EOF'
+        # Create deployment log
+        DEPLOY_LOG="/var/log/github_deploy.log"
+        exec > >(sudo tee -a $DEPLOY_LOG)
+        exec 2>&1
+        
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] === GitHub Actions Deployment Started ==="
+        
+        # Get instance metadata using IMDSv2
+        get_metadata() {
+            local metadata_path=$1
+            local token
+            
+            token=$(curl -X PUT "http://169.254.169.254/latest/api/token" \
+                -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" \
+                --connect-timeout 5 \
+                --silent \
+                --fail 2>/dev/null)
+            
+            if [ -n "$token" ]; then
+                curl -H "X-aws-ec2-metadata-token: $token" \
+                    --connect-timeout 5 \
+                    --silent \
+                    --fail \
+                    "http://169.254.169.254/latest/meta-data/$metadata_path" 2>/dev/null
+            else
+                echo "Unable to retrieve metadata"
+            fi
+        }
+        
+        # Get instance metadata
+        INSTANCE_ID=$(get_metadata "instance-id")
+        INSTANCE_TYPE=$(get_metadata "instance-type")
+        AVAILABILITY_ZONE=$(get_metadata "placement/availability-zone")
+        INSTANCE_DNS=$(get_metadata "public-hostname")
+        
+        if [ -z "$INSTANCE_DNS" ] || [ "$INSTANCE_DNS" = "Unable to retrieve metadata" ]; then
+            INSTANCE_DNS=$(get_metadata "local-hostname")
+        fi
+        
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Retrieved metadata: $INSTANCE_DNS, $INSTANCE_ID, $INSTANCE_TYPE"
+        
+        # Replace placeholders with actual values
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🔄 Replacing placeholders with actual values"
+        sed -i "s/INSTANCE_DNS_PLACEHOLDER/$INSTANCE_DNS/g" /tmp/index.html.template
+        sed -i "s/INSTANCE_ID_PLACEHOLDER/$INSTANCE_ID/g" /tmp/index.html.template
+        sed -i "s/INSTANCE_TYPE_PLACEHOLDER/$INSTANCE_TYPE/g" /tmp/index.html.template
+        sed -i "s/AVAILABILITY_ZONE_PLACEHOLDER/$AVAILABILITY_ZONE/g" /tmp/index.html.template
+        sed -i "s/LAST_UPDATED_PLACEHOLDER/$(date)/g" /tmp/index.html.template
+        
+        # Backup current file
+        if [ -f /var/www/html/index.html ]; then
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] 📋 Backing up current index.html"
+          sudo cp /var/www/html/index.html /var/www/html/index.html.backup.$(date +%s)
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Backup created"
+        fi
+        
+        # Move new file to web directory
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 📁 Moving processed index.html to web directory"
+        sudo mv /tmp/index.html.template /var/www/html/index.html
+        
+        # Set proper permissions
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🔐 Setting file permissions"
+        sudo chown apache:apache /var/www/html/index.html
+        sudo chmod 644 /var/www/html/index.html
+        
+        # Restart httpd service (UPDATED - was reload before)
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🔄 Restarting httpd service"
+        if sudo systemctl restart httpd; then
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ httpd restarted successfully"
+        else
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ httpd restart failed"
+          exit 1
+        fi
+        
+        # Wait for service to fully start
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⏳ Waiting for httpd service to fully start
