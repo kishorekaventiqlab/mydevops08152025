@@ -30,9 +30,10 @@ jobs:
         echo "📤 Copying index.html to EC2 instance..."
         scp -o StrictHostKeyChecking=no -i private_key index.html ${SSH_USERNAME}@${SSH_HOST}:/tmp/index.html.template
         
-        # Execute deployment commands on EC2
-        echo "🔧 Executing deployment commands on EC2..."
-        ssh -o StrictHostKeyChecking=no -i private_key ${SSH_USERNAME}@${SSH_HOST} << 'EOF'
+        # Create deployment script locally
+        cat > deploy_script.sh << 'SCRIPT_END'
+        #!/bin/bash
+        
         # Create deployment log
         DEPLOY_LOG="/var/log/github_deploy.log"
         exec > >(sudo tee -a $DEPLOY_LOG)
@@ -43,20 +44,9 @@ jobs:
         # Get instance metadata using IMDSv2
         get_metadata() {
             local metadata_path=$1
-            local token
-            
-            token=$(curl -X PUT "http://169.254.169.254/latest/api/token" \
-                -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" \
-                --connect-timeout 5 \
-                --silent \
-                --fail 2>/dev/null)
-            
+            local token=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" --connect-timeout 5 --silent --fail 2>/dev/null)
             if [ -n "$token" ]; then
-                curl -H "X-aws-ec2-metadata-token: $token" \
-                    --connect-timeout 5 \
-                    --silent \
-                    --fail \
-                    "http://169.254.169.254/latest/meta-data/$metadata_path" 2>/dev/null
+                curl -H "X-aws-ec2-metadata-token: $token" --connect-timeout 5 --silent --fail "http://169.254.169.254/latest/meta-data/$metadata_path" 2>/dev/null
             else
                 echo "Unable to retrieve metadata"
             fi
@@ -84,9 +74,9 @@ jobs:
         
         # Backup current file
         if [ -f /var/www/html/index.html ]; then
-          echo "[$(date '+%Y-%m-%d %H:%M:%S')] 📋 Backing up current index.html"
-          sudo cp /var/www/html/index.html /var/www/html/index.html.backup.$(date +%s)
-          echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Backup created"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 📋 Backing up current index.html"
+            sudo cp /var/www/html/index.html /var/www/html/index.html.backup.$(date +%s)
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Backup created"
         fi
         
         # Move new file to web directory
@@ -98,14 +88,61 @@ jobs:
         sudo chown apache:apache /var/www/html/index.html
         sudo chmod 644 /var/www/html/index.html
         
-        # Restart httpd service (UPDATED - was reload before)
+        # Restart httpd service
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🔄 Restarting httpd service"
         if sudo systemctl restart httpd; then
-          echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ httpd restarted successfully"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ httpd restarted successfully"
         else
-          echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ httpd restart failed"
-          exit 1
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ httpd restart failed"
+            exit 1
         fi
         
         # Wait for service to fully start
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⏳ Waiting for httpd service to fully start
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⏳ Waiting for httpd service to fully start"
+        sleep 3
+        
+        # Verify service status
+        HTTPD_STATUS=$(systemctl is-active httpd)
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] httpd service status: $HTTPD_STATUS"
+        
+        # Test website response
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🌐 Testing website response"
+        if curl -f -s http://localhost > /dev/null; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Website is responding correctly"
+            CONTENT_CHECK=$(curl -s http://localhost | grep -o "Hello [A-Za-z]*" | head -1)
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 📝 Current page content: $CONTENT_CHECK"
+        else
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Website not responding"
+            exit 1
+        fi
+        
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] === GitHub Actions Deployment Completed Successfully ==="
+        SCRIPT_END
+        
+        # Copy and execute deployment script on EC2
+        echo "🔧 Executing deployment commands on EC2..."
+        scp -o StrictHostKeyChecking=no -i private_key deploy_script.sh ${SSH_USERNAME}@${SSH_HOST}:/tmp/
+        ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -i private_key ${SSH_USERNAME}@${SSH_HOST} "chmod +x /tmp/deploy_script.sh && /tmp/deploy_script.sh"
+        
+        # Cleanup
+        rm -f private_key deploy_script.sh
+        
+        echo "✅ Deployment completed successfully!"
+
+    - name: Verify Deployment
+      env:
+        SSH_HOST: ${{ secrets.SSH_HOST }}
+      run: |
+        echo "🔍 Verifying deployment..."
+        sleep 5
+        
+        if curl -f -s "http://$SSH_HOST" > /dev/null; then
+          echo "✅ Website is accessible"
+          CONTENT=$(curl -s "http://$SSH_HOST" | grep -o "Hello [A-Za-z]*" | head -1)
+          echo "📝 Website displays: '$CONTENT'"
+          echo "🎉 Deployment verification successful!"
+          echo "🔗 Website URL: http://$SSH_HOST"
+        else
+          echo "❌ Website accessibility check failed"
+          exit 1
+        fi
